@@ -1,0 +1,46 @@
+================================================
+package.json
+----------------------------------------------------
+{
+  "name": "ifood-sync-rpa",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "login": "node index.js --login",
+    "dry": "node index.js --dry-run",
+    "sync": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "googleapis": "^132.0.0",
+    "papaparse": "^5.4.1",
+    "playwright": "^1.46.0"
+  }
+}
+=============================================== */
+
+/* ================================================
+map.json (exemplo)
+----------------------------------------------------
+{
+  "SKU-0001": "Pão de queijo (6 unidades)",
+  "SKU-0002": "Brownie Caju Zero"
+}
+=============================================== */
+
+/* ================================================
+XLSX esperado (exemplo)
+----------------------------------------------------
+sku,quantidade,preco
+SKU-0001,10,14.90
+SKU-0002,0,8.90
+
+- Quando STOP_SELL_AT_ZERO=true, quantidade 0 → desliga disponibilidade
+=============================================== */
+
+/* ================================================
+Crontab (00:00 diário, headless)
+----------------------------------------------------
+0 0 * * * TZ=America/Maceio /usr/bin/node /caminho/para/index.js >> /var/log/ifood-rpa.log 2>&1
+=============================================== */
