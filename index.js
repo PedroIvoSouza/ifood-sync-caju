@@ -20,8 +20,9 @@ const CONFIG = {
 
   // Mapeamento & campos
   MAP_FILE: process.env.MAP_FILE || './map.json', // opcional: SKU -> Nome do item como aparece no iFood
-  DEFAULT_PRICE_FIELD: process.env.DEFAULT_PRICE_FIELD || 'preco',
-  DEFAULT_QTY_FIELD: process.env.DEFAULT_QTY_FIELD || 'quantidade',
+  COL_PRODUCT: process.env.COL_PRODUCT || 'Nome',
+  COL_QTY: process.env.COL_QTY || 'Estoque',
+  COL_STATUS: process.env.COL_STATUS || 'Status Venda',
   STOP_SELL_AT_ZERO: (process.env.STOP_SELL_AT_ZERO || 'true').toLowerCase() === 'true',
 
   // Execução
@@ -162,13 +163,29 @@ async function setAvailability(page, keyword, available) {
   return false;
 }
 
-async function setPrice(page, keyword, price) {
+async function setStockIfVisible(page, keyword, qty) {
   await findAndOpenItem(page, keyword);
-  // Heurística: localizar input de preço dentro do card do item
+  // Heurística: procurar por campo de estoque caso exista no painel
   const card = page.getByRole('article').filter({ hasText: new RegExp(keyword, 'i') }).first();
-  const priceInputs = card.getByRole('spinbutton');
-  const count = await priceInputs.count();
-  if (!count) { warn('Input de preço não encontrado para', keyword); return false; }
+  // Tenta localizar input com label/placeholder relacionado a 'estoque'
+  const input = card.getByPlaceholder(/estoque|quantidade dispon[ií]vel|stock/i).first();
+  const exists = await input.isVisible().catch(() => false);
+  if (!exists) { return false; } // alguns paineis não têm controle de quantidade
+  if (CONFIG.DRY_RUN) { log(`[DRY] Estoque → ${keyword}: ${qty}`); return true; }
+  await input.fill('');
+  await input.type(String(Math.max(0, Math.floor(qty))));
+  // salvar, se houver botão
+  const save = card.getByRole('button', { name: /salvar|save|aplicar/i }).first();
+  if (await save.isVisible().catch(() => false)) {
+    await save.click();
+    await page.waitForTimeout(600);
+  } else {
+    await page.keyboard.press('Tab');
+    await page.waitForTimeout(300);
+  }
+  log(`Estoque atualizado → ${keyword}: ${qty}`);
+  return true;
+}
   const input = priceInputs.nth(0);
   if (CONFIG.DRY_RUN) { log(`[DRY] Preço → ${keyword}: ${price}`); return true; }
   await input.fill('');
@@ -197,6 +214,14 @@ async function runSync() {
   fs.writeFileSync(path.join(CONFIG.EVIDENCE_DIR, 'last.xlsx'), buf);
   const rows = parseXlsxBuffer(buf);
   log('Linhas:', rows.length);
+  if (!rows.length) { warn('Planilha sem linhas.'); return; }
+  // Normalização básica
+  const norm = rows.map(r => ({
+    nome: String(r[CONFIG.COL_PRODUCT] ?? '').trim(),
+    estoque: Number(r[CONFIG.COL_QTY] ?? 0),
+    status: String(r[CONFIG.COL_STATUS] ?? '').trim().toLowerCase()
+  })).filter(x => x.nome);
+  log('Itens com nome válido:', norm.length);
 
   const map = loadMap();
 
@@ -223,24 +248,22 @@ async function runSync() {
   await gotoCatalog(page);
 
   let ok = 0, fail = 0;
-  for (const row of rows) {
-    const sku = String(row.sku ?? row.SKU ?? '').trim();
-    if (!sku) { warn('Linha sem SKU'); continue; }
-    const price = Number(row[CONFIG.DEFAULT_PRICE_FIELD] ?? row.preco ?? row.price ?? 0);
-    const qty = Number(row[CONFIG.DEFAULT_QTY_FIELD] ?? row.quantidade ?? row.qty ?? 0);
-    const available = CONFIG.STOP_SELL_AT_ZERO ? qty > 0 : true;
+  for (const row of norm) {
+    const nome = row.nome;
+    const qty = isFinite(row.estoque) ? row.estoque : 0;
+    const statusAtivo = ['ativo','ativado','disponível','disponivel','on'].includes(row.status);
+    const available = statusAtivo && qty > 0; // regra: respeita Status Venda e zera quando estoque == 0
 
-    const keyword = map[sku] || sku; // pode mapear para o NOME do item no iFood
+    const keyword = nome; // busca por nome direto no catálogo do iFood
 
     try {
       const a1 = await setAvailability(page, keyword, available);
-      const a2 = await setPrice(page, keyword, price);
+      const a2 = await setStockIfVisible(page, keyword, qty); // tenta ajustar campo de estoque, se existir
       if (a1 || a2) ok++; else ok++;
     } catch (e) {
       fail++;
-      warn('Falha ao atualizar', sku, keyword, e.message);
-      await page.screenshot({ path: path.join(CONFIG.EVIDENCE_DIR, `err-${sku}.png`) });
-      // continua nos demais
+      warn('Falha ao atualizar', nome, e.message);
+      await page.screenshot({ path: path.join(CONFIG.EVIDENCE_DIR, `err-${nome.replace(/[^a-z0-9]+/gi,'_')}.png`) });
     }
   }
 
@@ -252,4 +275,3 @@ async function runSync() {
 if (require.main === module) {
   runSync().catch(e => { err(e.stack || e.message); process.exitCode = 1; });
 }
-
