@@ -141,16 +141,18 @@ async function openPersistentUserBrowser() {
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    channel: CONFIG.CHROME_CHANNEL || undefined,      // 'chrome' | 'msedge' | undefined
-    executablePath: CONFIG.CHROME_EXE || undefined,   // opcional
-    ignoreDefaultArgs: ['--enable-automation'],       // remove a flag de automação
+    channel: CONFIG.CHROME_CHANNEL || undefined,
+    executablePath: CONFIG.CHROME_EXE || undefined,
+
+    // ⬇️ Removemos as flags automáticas do Playwright QUE INCLUEM o no-sandbox em alguns ambientes
+    ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
+
     args: [
       `--profile-directory=${profile}`,
       '--start-maximized',
     ],
   });
 
-  // Disfarces básicos
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
@@ -161,6 +163,7 @@ async function openPersistentUserBrowser() {
   const page = await context.newPage();
   return { context, page };
 }
+
 
 async function saveStorage(context) {
   await context.storageState({ path: CONFIG.STORAGE_STATE });
