@@ -24,7 +24,7 @@ const CONFIG = {
 
   // iFood (painel web)
   IFOOD_LOGIN_URL: process.env.IFOOD_LOGIN_URL || 'https://portal.ifood.com.br/login',
-  IFOOD_CATALOG_URL: process.env.IFOOD_CATALOG_URL || 'https://portal.ifood.com.br/catalog',
+  IFOOD_CATALOG_URL: process.env.IFOOD_CATALOG_URL || 'https://portal.ifood.com.br/menu/list',
 
   // Colunas EXATAS da planilha
   COL_PRODUCT: process.env.COL_PRODUCT || 'Nome',
@@ -114,7 +114,6 @@ async function ensureEvidenceDir() {
   if (!fs.existsSync(CONFIG.EVIDENCE_DIR)) fs.mkdirSync(CONFIG.EVIDENCE_DIR, { recursive: true });
 }
 
-// Resolve CHROME_USER_DATA_DIR + CHROME_PROFILE
 function resolveUserDataAndProfile() {
   if (!CONFIG.CHROME_USER_DATA_DIR) return null;
 
@@ -128,7 +127,6 @@ function resolveUserDataAndProfile() {
     userDataDir = m[1];
     profile = m[2]; // "Default" ou "Profile 1"
   }
-
   return { userDataDir, profile: profile || 'Default' };
 }
 
@@ -157,17 +155,44 @@ async function openPersistentUserBrowser() {
     window.chrome = window.chrome || { runtime: {} };
   });
 
-  const page = await context.newPage();
-  return { context, page };
+  return context;
 }
 
-// Navegação no portal
-async function gotoCatalog(page) {
-  log('Indo ao catálogo:', CONFIG.IFOOD_CATALOG_URL);
-  await page.goto(CONFIG.IFOOD_CATALOG_URL, { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle');
+// Abre o catálogo usando a primeira aba do contexto e tenta múltiplas rotas
+async function gotoCatalog(context) {
+  let page = context.pages()[0] || await context.newPage();
+  await page.bringToFront();
+
+  // Log do console da página p/ debug
+  page.on('console', (msg) => log('[page-console]', msg.text()));
+
+  const primary = CONFIG.IFOOD_CATALOG_URL || 'https://portal.ifood.com.br/menu/list';
+  const candidates = [
+    primary,
+    'https://portal.ifood.com.br/menu/list',
+    'https://portal.ifood.com.br/catalog',
+    'https://portal.ifood.com.br/catalog/menu'
+  ];
+
+  for (const url of candidates) {
+    try {
+      log('Abrindo:', url);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
+      await page.waitForLoadState('networkidle', { timeout: 120000 });
+
+      const current = page.url();
+      if (/portal\.ifood\.com\.br\/(menu|catalog)/i.test(current)) {
+        log('No painel do catálogo:', current);
+        return page;
+      }
+    } catch (e) {
+      warn('Falha ao abrir', url, e.message);
+    }
+  }
+  throw new Error('Não consegui abrir o painel de catálogo do iFood (menu/catalog).');
 }
 
+// Busca rápida
 async function findAndOpenItem(page, keyword) {
   // Estratégia genérica para buscar item
   const search = page.getByPlaceholder(/buscar|pesquisar|search/i).first();
@@ -179,46 +204,96 @@ async function findAndOpenItem(page, keyword) {
   await page.waitForTimeout(1200);
 }
 
+// Localiza o "card" do produto por nome (usa role=article; fallback em div)
+function cardLocator(page, keyword) {
+  const rx = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const article = page.getByRole('article').filter({ hasText: rx }).first();
+  return article;
+}
+
+// Heurística: alternar Play/Pause (ícone sem texto)
+async function toggleAvailabilityIconOnly(card, shouldBeAvailable) {
+  // 1) Tente um botão com [aria-pressed]
+  const toggleBtn = card.locator('button[aria-pressed]').first();
+  if (await toggleBtn.isVisible().catch(() => false)) {
+    const attr = await toggleBtn.getAttribute('aria-pressed');
+    const isOn = attr === 'true';
+    if (isOn !== shouldBeAvailable) {
+      await toggleBtn.click();
+      await card.page().waitForTimeout(500);
+      return true;
+    }
+    return false;
+  }
+
+  // 2) Senão, qualquer botão com SVG (ícone de play/pause)
+  const iconBtn = card.locator('button:has(svg)').first();
+  if (await iconBtn.isVisible().catch(() => false)) {
+    // Tenta inferir pelo HTML do SVG
+    const svg = iconBtn.locator('svg').first();
+    const html = await svg.evaluate(el => el.outerHTML).catch(() => '');
+    const looksPlay = /play/i.test(html);
+    const looksPause = /pause/i.test(html);
+
+    // Convenção: se mostrar "play", estado atual é PAUSADO (precisa ativar)
+    // se "pause", estado atual é ATIVO (pode pausar).
+    let isOn = null;
+    if (looksPlay) isOn = false;
+    if (looksPause) isOn = true;
+
+    if (isOn === null || isOn !== shouldBeAvailable) {
+      await iconBtn.click();
+      await card.page().waitForTimeout(500);
+      return true;
+    }
+    return false;
+  }
+
+  throw new Error('Botão de play/pause não localizado no card.');
+}
+
+// Heurística: definir estoque (input numérico simples)
+async function setStockNumberInput(card, qty) {
+  // 1) input[type=number]
+  let input = card.locator('input[type="number"]').first();
+  if (!(await input.isVisible().catch(() => false))) {
+    // 2) qualquer input dentro do card
+    input = card.locator('input').first();
+    if (!(await input.isVisible().catch(() => false))) return false;
+  }
+  await input.fill('');
+  await input.type(String(Math.max(0, Math.floor(qty))));
+  // Tenta salvar (se existir botão próximo)
+  const save = card.getByRole('button', { name: /salvar|save|aplicar/i }).first();
+  if (await save.isVisible().catch(() => false)) {
+    await save.click();
+    await card.page().waitForTimeout(600);
+  } else {
+    await card.page().keyboard.press('Tab');
+    await card.page().waitForTimeout(300);
+  }
+  return true;
+}
+
 async function setAvailability(page, keyword, available) {
   await findAndOpenItem(page, keyword);
-
-  const card = page.getByRole('article').filter({ hasText: new RegExp(keyword, 'i') }).first();
-  const toggle = card.getByRole('switch');
-  const isChecked = await toggle.isChecked().catch(() => null);
-  if (isChecked == null) throw new Error('Toggle de disponibilidade não encontrado');
-
-  if ((available && !isChecked) || (!available && isChecked)) {
-    await toggle.click();
-    await page.waitForTimeout(500);
-    log(`Disponibilidade atualizada → ${keyword}: ${available}`);
-    return true;
+  const card = cardLocator(page, keyword);
+  if (!(await card.isVisible().catch(() => false))) {
+    throw new Error('Card do produto não encontrado');
   }
-  log(`Disponibilidade já correta → ${keyword}: ${available}`);
-  return false;
+  const changed = await toggleAvailabilityIconOnly(card, available);
+  if (changed) log(`Disponibilidade atualizada → ${keyword}: ${available}`);
+  else log(`Disponibilidade já correta → ${keyword}: ${available}`);
+  return changed;
 }
 
 async function setStockIfVisible(page, keyword, qty) {
   await findAndOpenItem(page, keyword);
-
-  const card = page.getByRole('article').filter({ hasText: new RegExp(keyword, 'i') }).first();
-  // Tenta localizar input de estoque
-  const input = card.getByPlaceholder(/estoque|quantidade dispon[ií]vel|stock/i).first();
-  const exists = await input.isVisible().catch(() => false);
-  if (!exists) return false; // painel pode não ter campo numérico de estoque
-
-  await input.fill('');
-  await input.type(String(Math.max(0, Math.floor(qty))));
-
-  const save = card.getByRole('button', { name: /salvar|save|aplicar/i }).first();
-  if (await save.isVisible().catch(() => false)) {
-    await save.click();
-    await page.waitForTimeout(600);
-  } else {
-    await page.keyboard.press('Tab');
-    await page.waitForTimeout(300);
-  }
-  log(`Estoque atualizado → ${keyword}: ${qty}`);
-  return true;
+  const card = cardLocator(page, keyword);
+  if (!(await card.isVisible().catch(() => false))) return false;
+  const ok = await setStockNumberInput(card, qty);
+  if (ok) log(`Estoque atualizado → ${keyword}: ${qty}`);
+  return ok;
 }
 
 // ---------- Core ----------
@@ -253,7 +328,7 @@ async function runSync() {
 
   // 1) Drive → XLSX
   log('Baixando XLSX do Drive...');
-  const { buffer: buf, name } = await downloadLatestXlsxBuffer();
+  const { buffer: buf } = await downloadLatestXlsxBuffer();
   // guarda a última planilha como evidência
   fs.writeFileSync(path.join(CONFIG.EVIDENCE_DIR, 'last.xlsx'), buf);
 
@@ -282,9 +357,9 @@ async function runSync() {
   if (CONFIG.LOGIN_MODE) {
     const persistent = resolveUserDataAndProfile();
     if (persistent) {
-      const { context, page } = await openPersistentUserBrowser();
+      const context = await openPersistentUserBrowser();
       try {
-        await gotoCatalog(page);
+        await gotoCatalog(context);
         log('Perfil persistente em uso. Fechando e saindo do modo --login.');
       } finally {
         await context.close();
@@ -303,9 +378,9 @@ async function runSync() {
     return;
   }
 
-  const { context, page } = await openPersistentUserBrowser();
+  const context = await openPersistentUserBrowser();
   try {
-    await gotoCatalog(page);
+    const page = await gotoCatalog(context);
 
     let ok = 0, fail = 0;
     for (const it of items) {
