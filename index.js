@@ -185,13 +185,16 @@ async function setStockIfVisible(page, keyword, qty) {
 function normalizeRows(rows) {
   const out = [];
   for (const r of rows) {
-    const nome = String(r[CONFIG.COLL_PRODUCT] ?? r[CONFIG.COL_PRODUCT] ?? '').trim(); // tolera typo acidental
+    const nome = String(r[CONFIG.COL_PRODUCT] ?? '').trim();
     const estoqueRaw = r[CONFIG.COL_QTY];
     const statusRaw = r[CONFIG.COL_STATUS];
 
+    // Ignorar linhas-resumo ou vazias
     if (!nome) continue;
+    if (/^total itens\s*=/i.test(nome)) continue; // ex.: "Total Itens=40"
 
-    const estoque = Number.isFinite(Number(estoqueRaw)) ? Number(estoqueRaw) : 0;
+    const estoqueNum = Number(estoqueRaw);
+    const estoque = Number.isFinite(estoqueNum) ? estoqueNum : 0;
     const status = String(statusRaw ?? '').trim().toLowerCase();
 
     out.push({ nome, estoque, status });
