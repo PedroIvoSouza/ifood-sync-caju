@@ -150,7 +150,7 @@ async function openPersistentUserBrowser() {
     ],
   });
 
-  // Disfarces básicos, sem mexer em web-security:
+  // Disfarces básicos
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
@@ -161,7 +161,6 @@ async function openPersistentUserBrowser() {
   const page = await context.newPage();
   return { context, page };
 }
-
 
 async function saveStorage(context) {
   await context.storageState({ path: CONFIG.STORAGE_STATE });
@@ -269,7 +268,8 @@ async function runSync() {
   // 1) Drive → XLSX
   log('Baixando XLSX do Drive...');
   const { buffer: buf, name } = await downloadLatestXlsxBuffer();
-  fs.writeFileSync(path.join(__dirname, 'auth.json'), JSON.stringify(tokens, null, 2));
+  // guarda a última planilha como evidência
+  fs.writeFileSync(path.join(CONFIG.EVIDENCE_DIR, 'last.xlsx'), buf);
 
   // 2) Parse planilha
   const rows = parseXlsxBuffer(buf);
