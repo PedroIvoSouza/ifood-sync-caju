@@ -139,22 +139,18 @@ async function openPersistentUserBrowser() {
   if (!resolved) throw new Error('Defina CHROME_USER_DATA_DIR no .env para usar o perfil do seu navegador');
   const { userDataDir, profile } = resolved;
 
-  /** @type {import('playwright').BrowserContext} */
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    channel: CONFIG.CHROME_CHANNEL || undefined, // 'chrome' | 'msedge' | undefined
-    executablePath: CONFIG.CHROME_EXE || undefined, // opcional
-    ignoreDefaultArgs: ['--enable-automation'],
+    channel: CONFIG.CHROME_CHANNEL || undefined,      // 'chrome' | 'msedge' | undefined
+    executablePath: CONFIG.CHROME_EXE || undefined,   // opcional
+    ignoreDefaultArgs: ['--enable-automation'],       // remove a flag de automação
     args: [
       `--profile-directory=${profile}`,
-      '--disable-blink-features=AutomationControlled',
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
       '--start-maximized',
     ],
   });
 
-  // Disfarces básicos
+  // Disfarces básicos, sem mexer em web-security:
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
@@ -165,6 +161,7 @@ async function openPersistentUserBrowser() {
   const page = await context.newPage();
   return { context, page };
 }
+
 
 async function saveStorage(context) {
   await context.storageState({ path: CONFIG.STORAGE_STATE });
