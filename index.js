@@ -48,6 +48,7 @@ const log = (...a) => console.log(new Date().toISOString(), '-', ...a);
 const warn = (...a) => console.warn(new Date().toISOString(), '- WARN -', ...a);
 const err = (...a) => console.error(new Date().toISOString(), '- ERROR -', ...a);
 
+
 // ---------- Google Drive ----------
 function getDriveClient() {
   if (CONFIG.GOOGLE_AUTH_TYPE === 'service_account') {
@@ -111,6 +112,20 @@ async function ensureEvidenceDir() {
 async function saveStorage(context) {
   await context.storageState({ path: CONFIG.STORAGE_STATE });
   log('Sessão salva em', CONFIG.STORAGE_STATE);
+}
+
+async function openPersistentChrome() {
+  const userDataDir = process.env.CHROME_USER_DATA_DIR;
+  const channel = process.env.CHROME_CHANNEL || 'chrome';
+  if (!userDataDir) throw new Error('Defina CHROME_USER_DATA_DIR no .env para usar Chrome/Edge persistente');
+
+  // Abre seu perfil real do Chrome/Edge, não é headless
+  const context = await chromium.launchPersistentContext(userDataDir, {
+    channel,
+    headless: false,
+  });
+  const page = await context.newPage();
+  return { context, page };
 }
 
 // ---------- Fluxos de UI ----------
@@ -249,11 +264,26 @@ async function runSync() {
   }
 
   if (CONFIG.LOGIN_MODE) {
+  if (process.env.CHROME_USER_DATA_DIR) {
+    // Usa seu Chrome/Edge com perfil persistente (já logado ou para logar 1x)
+    const { context, page } = await openPersistentChrome();
+    // Se você JÁ está logado no portal, pode ir direto ao catálogo:
+    await gotoCatalog(page);
+    log('Se o portal abriu logado, basta voltar ao terminal e pressionar ENTER para salvar a sessão.');
+    log('Se não estiver logado, faça o login normalmente no navegador aberto; depois volte e pressione ENTER.');
+    await new Promise((res) => process.stdin.once('data', res));
+    await saveStorage(context);
+    await context.close();
+    return;
+  } else {
+    // Caminho antigo (Chromium padrão do Playwright)
     await loginFlow(page);
     await saveStorage(context);
     await browser.close();
     return;
   }
+}
+
 
   await gotoCatalog(page);
 
