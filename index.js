@@ -114,19 +114,38 @@ async function saveStorage(context) {
   log('Sessão salva em', CONFIG.STORAGE_STATE);
 }
 
-async function openPersistentChrome() {
+async function openUndetectedChrome() {
   const userDataDir = process.env.CHROME_USER_DATA_DIR;
-  const channel = process.env.CHROME_CHANNEL || 'chrome';
-  if (!userDataDir) throw new Error('Defina CHROME_USER_DATA_DIR no .env para usar Chrome/Edge persistente');
+  const executablePath = process.env.CHROME_EXE || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  if (!userDataDir) throw new Error('Defina CHROME_USER_DATA_DIR no .env');
 
-  // Abre seu perfil real do Chrome/Edge, não é headless
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    channel,
+  // Lança o Chrome “limpo” e sem as flags de automação mais óbvias
+  const browser = await chromium.launch({
     headless: false,
+    executablePath,
+    args: [
+      `--user-data-dir=${userDataDir}`,
+      '--disable-blink-features=AutomationControlled',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process',
+    ],
+    ignoreDefaultArgs: ['--enable-automation'],
   });
+
+  const context = await browser.newContext();
+  // Disfarces básicos
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    // Idiomas e plugins parecidos com um navegador real
+    Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+    window.chrome = window.chrome || { runtime: {} };
+  });
+
   const page = await context.newPage();
-  return { context, page };
+  return { browser, context, page };
 }
+
 
 // ---------- Fluxos de UI ----------
 async function loginFlow(page) {
@@ -264,24 +283,26 @@ async function runSync() {
   }
 
   if (CONFIG.LOGIN_MODE) {
+  // Tenta modo “menos detectável”
   if (process.env.CHROME_USER_DATA_DIR) {
-    // Usa seu Chrome/Edge com perfil persistente (já logado ou para logar 1x)
-    const { context, page } = await openPersistentChrome();
-    // Se você JÁ está logado no portal, pode ir direto ao catálogo:
-    await gotoCatalog(page);
-    log('Se o portal abriu logado, basta voltar ao terminal e pressionar ENTER para salvar a sessão.');
-    log('Se não estiver logado, faça o login normalmente no navegador aberto; depois volte e pressione ENTER.');
-    await new Promise((res) => process.stdin.once('data', res));
-    await saveStorage(context);
-    await context.close();
-    return;
-  } else {
-    // Caminho antigo (Chromium padrão do Playwright)
-    await loginFlow(page);
-    await saveStorage(context);
-    await browser.close();
+    const { browser, context, page } = await openUndetectedChrome();
+    try {
+      await gotoCatalog(page); // se já tiver login neste perfil, deve abrir direto
+      log('Se já estiver no catálogo, volte ao terminal e pressione ENTER.');
+      log('Se pedir login, faça-o normalmente (humano). Depois volte e pressione ENTER.');
+      await new Promise((res) => process.stdin.once('data', res));
+      await saveStorage(context);
+    } finally {
+      await browser.close();
+    }
     return;
   }
+
+  // Fallback (Chromium padrão do Playwright)
+  await loginFlow(page);
+  await saveStorage(context);
+  await browser.close();
+  return;
 }
 
 
