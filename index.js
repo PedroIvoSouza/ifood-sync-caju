@@ -127,7 +127,7 @@ function resolveUserDataAndProfile() {
   return { userDataDir, profile: profile || 'Default' };
 }
 
-// PERFIL PERSISTENTE (opcional)
+// PERFIL PERSISTENTE (Edge)
 async function openPersistentUserBrowser() {
   const resolved = resolveUserDataAndProfile();
   if (!resolved) throw new Error('Defina CHROME_USER_DATA_DIR no .env para usar o perfil do seu navegador');
@@ -135,9 +135,9 @@ async function openPersistentUserBrowser() {
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    channel: CONFIG.CHROME_CHANNEL || undefined,
+    channel: CONFIG.CHROME_CHANNEL || 'msedge',  // Edge
     executablePath: CONFIG.CHROME_EXE || undefined,
-    ignoreDefaultArgs: ['--enable-automation'], // não removemos --no-sandbox
+    ignoreDefaultArgs: ['--enable-automation'],
     args: [`--profile-directory=${profile}`, '--start-maximized'],
   });
 
@@ -150,11 +150,11 @@ async function openPersistentUserBrowser() {
   return context;
 }
 
-// NAVEGADOR "NORMAL" (sem perfil) + storageState
+// NAVEGADOR "NORMAL" (sem perfil) + storageState (fallback)
 async function openEphemeralBrowser() {
   const browser = await chromium.launch({
     headless: false,
-    channel: CONFIG.CHROME_CHANNEL || 'msedge', // ou 'chrome' se preferir
+    channel: CONFIG.CHROME_CHANNEL || 'msedge',
     executablePath: CONFIG.CHROME_EXE || undefined,
   });
   const context = await browser.newContext({
