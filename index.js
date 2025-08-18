@@ -152,17 +152,24 @@ async function openPersistentUserBrowser() {
 
 // NAVEGADOR "NORMAL" (sem perfil) + storageState
 async function openEphemeralBrowser() {
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({
+    headless: false,
+    channel: CONFIG.CHROME_CHANNEL || 'msedge', // ou 'chrome' se preferir
+    executablePath: CONFIG.CHROME_EXE || undefined,
+  });
   const context = await browser.newContext({
     storageState: fs.existsSync(CONFIG.STORAGE_STATE) ? CONFIG.STORAGE_STATE : undefined,
   });
+
   context.on('page', p => {
     p.on('console', msg => log('[page-console]', msg.type(), msg.text()));
     p.on('pageerror', e => err('pageerror:', e.message));
     p.on('requestfailed', r => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
   });
+
   return { browser, context };
 }
+
 
 // Abertura do catálogo em ABA NOVA (ignora about:blank)
 async function gotoCatalogUsingFreshTab(context) {
