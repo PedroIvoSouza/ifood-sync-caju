@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const XLSX = require('xlsx');
 const { google } = require('googleapis');
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
 
 const CONFIG = {
   TIMEZONE: process.env.TZ || 'America/Maceio',
@@ -115,21 +115,19 @@ async function saveStorage(context) {
 }
 
 async function openUndetectedChrome() {
-  const userDataDir = process.env.CHROME_USER_DATA_DIR;
-  const executablePath = process.env.CHROME_EXE || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-  if (!userDataDir) throw new Error('Defina CHROME_USER_DATA_DIR no .env');
+  const userDataDir = 'C:/Users/cajuh/AppData/Local/Google/Chrome/User Data';
 
-  // Abre um contexto PERSISTENTE (perfil real) e remove flags óbvias de automação
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    executablePath,
-    ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
-    ],
+      '--start-maximized'
+    ]
   });
+
+  const page = await context.newPage();
+  await page.goto('https://www.ifood.com.br');
+  return page;
+}
 
   // Disfarces básicos no contexto
   await context.addInitScript(() => {
