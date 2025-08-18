@@ -138,14 +138,24 @@ async function openPersistentUserBrowser() {
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    channel: CONFIG.CHROME_CHANNEL || undefined,      // 'chrome' | 'msedge' | undefined
+    channel: CONFIG.CHROME_CHANNEL || undefined,      // 'chrome' | 'msedge'
     executablePath: CONFIG.CHROME_EXE || undefined,   // opcional
-    ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'], // remove flags "suspeitas"
+    ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
     args: [
       `--profile-directory=${profile}`,
       '--start-maximized',
     ],
   });
+
+  // Logs úteis
+  context.on('page', p => {
+    p.on('console', msg => log('[page-console]', msg.type(), msg.text()));
+    p.on('pageerror', e => err('pageerror:', e.message));
+    p.on('requestfailed', r => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
+  });
+
+  return context;
+}
 
   // Disfarces básicos
   await context.addInitScript(() => {
@@ -159,12 +169,14 @@ async function openPersistentUserBrowser() {
 }
 
 // Abre o catálogo usando a primeira aba do contexto e tenta múltiplas rotas
-async function gotoCatalog(context) {
-  let page = context.pages()[0] || await context.newPage();
-  await page.bringToFront();
+async function gotoCatalog(contextOrPage) {
+  const isPage = typeof contextOrPage.goto === 'function';
+  let page = isPage ? contextOrPage : (contextOrPage.pages()[0] || await contextOrPage.newPage());
 
-  // Log do console da página p/ debug
-  page.on('console', (msg) => log('[page-console]', msg.text()));
+  // garante logs mesmo na primeira aba
+  page.on('console', (msg) => log('[page-console]', msg.type(), msg.text()));
+  page.on('pageerror', (e) => err('pageerror:', e.message));
+  page.on('requestfailed', (r) => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
 
   const primary = CONFIG.IFOOD_CATALOG_URL || 'https://portal.ifood.com.br/menu/list';
   const candidates = [
@@ -174,23 +186,55 @@ async function gotoCatalog(context) {
     'https://portal.ifood.com.br/catalog/menu'
   ];
 
-  for (const url of candidates) {
+  // helper de navegação “teimosa”
+  const tryNavigate = async (p, url) => {
     try {
       log('Abrindo:', url);
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-      await page.waitForLoadState('networkidle', { timeout: 120000 });
+      // 1ª tentativa: navegação normal
+      await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      // espera rede estabilizar, mas sem travar para sempre
+      await p.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+      if (/portal\.ifood\.com\.br\/(menu|catalog)/i.test(p.url())) return true;
 
-      const current = page.url();
-      if (/portal\.ifood\.com\.br\/(menu|catalog)/i.test(current)) {
-        log('No painel do catálogo:', current);
-        return page;
-      }
+      // 2ª: força via script (alguns bloqueios de extensão quebram o goto)
+      await p.evaluate(u => { window.location.href = u; }, url);
+      await p.waitForURL(/portal\.ifood\.com\.br\/(menu|catalog)/i, { timeout: 45000 });
+      await p.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
+      return true;
     } catch (e) {
       warn('Falha ao abrir', url, e.message);
+      return false;
+    }
+  };
+
+  // Tente nos candidatos na aba atual
+  for (const url of candidates) {
+    if (await tryNavigate(page, url)) {
+      log('No painel do catálogo:', page.url());
+      return page;
     }
   }
+
+  // Se ainda está em about:blank, cria uma nova aba “limpa” e tenta de novo
+  if (!isPage) {
+    const fresh = await contextOrPage.newPage();
+    fresh.on('console', (msg) => log('[page-console]', msg.type(), msg.text()));
+    fresh.on('pageerror', (e) => err('pageerror:', e.message));
+    fresh.on('requestfailed', (r) => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
+
+    for (const url of candidates) {
+      if (await tryNavigate(fresh, url)) {
+        log('No painel do catálogo (nova aba):', fresh.url());
+        // fecha a about:blank antiga se ela ainda existir parada
+        try { if (page && page.url().startsWith('about:')) await page.close(); } catch {}
+        return fresh;
+      }
+    }
+  }
+
   throw new Error('Não consegui abrir o painel de catálogo do iFood (menu/catalog).');
 }
+
 
 // Busca rápida
 async function findAndOpenItem(page, keyword) {
