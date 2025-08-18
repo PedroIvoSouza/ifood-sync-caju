@@ -2,8 +2,8 @@
 // iFood Sync via Navegador (RPA) — Playwright + Drive + XLSX
 // - Lê o único XLSX da pasta do Google Drive
 // - Interpreta Nome / Estoque / Status Venda
-// - Usa seu Chrome/Edge (perfil persistente) para operar no painel do iFood
-// - "--dry-run": simula; "--login": só abre catálogo com seu perfil; padrão: sincroniza
+// - Usa navegador Playwright "normal" (sem seu usuário) OU seu perfil persistente
+// - "--dry-run": simula; "--login": captura sessão; padrão: sincroniza
 // ================================================
 
 require('dotenv').config();
@@ -38,11 +38,12 @@ const CONFIG = {
   DRY_RUN: process.argv.includes('--dry-run'),
   LOGIN_MODE: process.argv.includes('--login'),
   EVIDENCE_DIR: process.env.EVIDENCE_DIR || './evidence',
+  STORAGE_STATE: process.env.STORAGE_STATE || './auth.json', // sessão quando usar navegador "normal"
 
   // Mapeamento opcional: Nome planilha -> Nome no iFood
   MAP_FILE: process.env.MAP_FILE || './map.json',
 
-  // Chrome/Edge (perfil persistente)
+  // Chrome/Edge (perfil persistente) — opcional
   CHROME_CHANNEL: process.env.CHROME_CHANNEL || '', // 'chrome' | 'msedge' | ''
   CHROME_USER_DATA_DIR: process.env.CHROME_USER_DATA_DIR || '', // ...\User Data  OU  ...\User Data\Default
   CHROME_PROFILE: process.env.CHROME_PROFILE || '', // 'Default' | 'Profile 1' | etc (opcional)
@@ -114,11 +115,8 @@ async function ensureEvidenceDir() {
 
 function resolveUserDataAndProfile() {
   if (!CONFIG.CHROME_USER_DATA_DIR) return null;
-
   let userDataDir = CONFIG.CHROME_USER_DATA_DIR;
   let profile = CONFIG.CHROME_PROFILE;
-
-  // Se o usuário passou ...\User Data\Default diretamente, separe:
   const normalized = userDataDir.replace(/\//g, '\\');
   const m = normalized.match(/(.*\\User Data)\\([^\\]+)$/i);
   if (m && !profile) {
@@ -128,6 +126,7 @@ function resolveUserDataAndProfile() {
   return { userDataDir, profile: profile || 'Default' };
 }
 
+// PERFIL PERSISTENTE (opcional)
 async function openPersistentUserBrowser() {
   const resolved = resolveUserDataAndProfile();
   if (!resolved) throw new Error('Defina CHROME_USER_DATA_DIR no .env para usar o perfil do seu navegador');
@@ -135,16 +134,12 @@ async function openPersistentUserBrowser() {
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    channel: CONFIG.CHROME_CHANNEL || undefined,      // 'chrome' | 'msedge'
-    executablePath: CONFIG.CHROME_EXE || undefined,   // opcional
+    channel: CONFIG.CHROME_CHANNEL || undefined,
+    executablePath: CONFIG.CHROME_EXE || undefined,
     ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
-    args: [
-      `--profile-directory=${profile}`,
-      '--start-maximized',
-    ],
+    args: [`--profile-directory=${profile}`, '--start-maximized'],
   });
 
-  // Logs úteis por página
   context.on('page', p => {
     p.on('console', msg => log('[page-console]', msg.type(), msg.text()));
     p.on('pageerror', e => err('pageerror:', e.message));
@@ -154,22 +149,34 @@ async function openPersistentUserBrowser() {
   return context;
 }
 
+// NAVEGADOR "NORMAL" (sem perfil) + storageState
+async function openEphemeralBrowser() {
+  const launch = await chromium.launch({ headless: false });
+  const context = await launch.newContext({
+    storageState: fs.existsSync(CONFIG.STORAGE_STATE) ? CONFIG.STORAGE_STATE : undefined,
+  });
+  context.on('page', p => {
+    p.on('console', msg => log('[page-console]', msg.type(), msg.text()));
+    p.on('pageerror', e => err('pageerror:', e.message));
+    p.on('requestfailed', r => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
+  });
+  return { browser: launch, context };
+}
+
+// Abrir catálogo teimosamente
 async function gotoCatalog(contextOrPage) {
   const isPage = typeof contextOrPage.goto === 'function';
   let page = isPage ? contextOrPage : (contextOrPage.pages()[0] || await contextOrPage.newPage());
   await page.bringToFront();
 
-  // Garantir handlers mesmo na primeira aba
   page.on('console', (msg) => log('[page-console]', msg.type(), msg.text()));
   page.on('pageerror', (e) => err('pageerror:', e.message));
   page.on('requestfailed', (r) => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
 
-  const primary = CONFIG.IFOOD_CATALOG_URL || 'https://portal.ifood.com.br/menu/list';
   const candidates = [
-    primary,
+    CONFIG.IFOOD_CATALOG_URL || 'https://portal.ifood.com.br/menu/list',
     'https://portal.ifood.com.br/menu/list',
     'https://portal.ifood.com.br/catalog',
-    'https://portal.ifood.com.br/catalog/menu'
   ];
 
   const tryNavigate = async (p, url) => {
@@ -179,7 +186,6 @@ async function gotoCatalog(contextOrPage) {
       await p.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
       if (/portal\.ifood\.com\.br\/(menu|catalog)/i.test(p.url())) return true;
 
-      // forçar via script
       await p.evaluate(u => { window.location.href = u; }, url);
       await p.waitForURL(/portal\.ifood\.com\.br\/(menu|catalog)/i, { timeout: 45000 });
       await p.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
@@ -197,16 +203,12 @@ async function gotoCatalog(contextOrPage) {
     }
   }
 
-  // Se ainda preso, abrir uma aba nova “limpa”
+  // Tenta nova aba “limpa”
   if (!isPage) {
     const fresh = await contextOrPage.newPage();
-    fresh.on('console', (msg) => log('[page-console]', msg.type(), msg.text()));
-    fresh.on('pageerror', (e) => err('pageerror:', e.message));
-    fresh.on('requestfailed', (r) => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
-
     for (const url of candidates) {
       if (await tryNavigate(fresh, url)) {
-        log('No painel do catálogo (nova aba):', fresh.url());
+        log('No painel (nova aba):', fresh.url());
         try { if (page && page.url().startsWith('about:')) await page.close(); } catch {}
         return fresh;
       }
@@ -223,7 +225,7 @@ async function findAndOpenItem(page, keyword) {
     await search.fill('');
     await search.fill(keyword);
     await search.press('Enter');
-  } catch (_) { /* sem campo de busca, segue */ }
+  } catch (_) {}
   await page.waitForTimeout(1200);
 }
 
@@ -233,7 +235,6 @@ function cardLocator(page, keyword) {
 }
 
 async function toggleAvailabilityIconOnly(card, shouldBeAvailable) {
-  // 1) Botão com aria-pressed
   const toggleBtn = card.locator('button[aria-pressed]').first();
   if (await toggleBtn.isVisible().catch(() => false)) {
     const attr = await toggleBtn.getAttribute('aria-pressed');
@@ -246,15 +247,12 @@ async function toggleAvailabilityIconOnly(card, shouldBeAvailable) {
     return false;
   }
 
-  // 2) Botão com SVG (ícone play/pause)
   const iconBtn = card.locator('button:has(svg)').first();
   if (await iconBtn.isVisible().catch(() => false)) {
     const svg = iconBtn.locator('svg').first();
     const html = await svg.evaluate(el => el.outerHTML).catch(() => '');
     const looksPlay = /play/i.test(html);
     const looksPause = /pause/i.test(html);
-
-    // Heurística: play = está pausado (precisa ativar); pause = está ativo
     let isOn = null;
     if (looksPlay) isOn = false;
     if (looksPause) isOn = true;
@@ -271,16 +269,13 @@ async function toggleAvailabilityIconOnly(card, shouldBeAvailable) {
 }
 
 async function setStockNumberInput(card, qty) {
-  // 1) input[type=number]
   let input = card.locator('input[type="number"]').first();
   if (!(await input.isVisible().catch(() => false))) {
-    // 2) primeiro input do card
     input = card.locator('input').first();
     if (!(await input.isVisible().catch(() => false))) return false;
   }
   await input.fill('');
   await input.type(String(Math.max(0, Math.floor(qty))));
-  // salvar, se houver
   const save = card.getByRole('button', { name: /salvar|save|aplicar/i }).first();
   if (await save.isVisible().catch(() => false)) {
     await save.click();
@@ -367,43 +362,88 @@ async function runSync() {
     return;
   }
 
-  // 4) "--login": só abre o catálogo e fecha
+  // 4) LOGIN (captura sessão)
   if (CONFIG.LOGIN_MODE) {
-    const context = await openPersistentUserBrowser();
-    try {
-      await gotoCatalog(context);
-      log('Perfil persistente em uso. Fechando e saindo do modo --login.');
-    } finally {
-      await context.close();
+    const persistent = resolveUserDataAndProfile();
+    if (persistent) {
+      const context = await openPersistentUserBrowser();
+      try {
+        await gotoCatalog(context);
+        log('Perfil persistente OK. (Não usa auth.json)');
+      } finally { await context.close(); }
+      return;
+    } else {
+      const { browser, context } = await openEphemeralBrowser();
+      try {
+        log('Abrindo tela de login:', CONFIG.IFOOD_LOGIN_URL);
+        const page = await context.newPage();
+        await page.goto(CONFIG.IFOOD_LOGIN_URL, { waitUntil: 'domcontentloaded' });
+        await page.waitForLoadState('networkidle').catch(()=>{});
+
+        log('Faça login manualmente (inclui desafios tipo "clique e segure"). Vou salvar quando sair da URL /login.');
+        await page.waitForURL(url => !/\/login/i.test(url), { timeout: 0 });
+        await context.storageState({ path: CONFIG.STORAGE_STATE });
+        log('Sessão salva em', CONFIG.STORAGE_STATE);
+      } finally {
+        await browser.close();
+      }
+      return;
     }
-    return;
   }
 
   // 5) Execução "valendo"
-  const context = await openPersistentUserBrowser();
-  try {
-    const page = await gotoCatalog(context);
-
-    let ok = 0, fail = 0;
-    for (const it of items) {
-      const nomeIf = map[it.nome] || it.nome;
-      const ativo = isStatusAtivo(it.status);
-      const available = CONFIG.STOP_SELL_AT_ZERO ? (ativo && it.estoque > 0) : ativo;
-
-      try {
-        const a1 = await setAvailability(page, nomeIf, available);
-        const a2 = await setStockIfVisible(page, nomeIf, it.estoque);
-        if (a1 || a2) ok++; else ok++;
-      } catch (e) {
-        fail++;
-        warn('Falha ao atualizar', nomeIf, e.message);
-        await page.screenshot({ path: path.join(CONFIG.EVIDENCE_DIR, `err-${nomeIf.replace(/[^a-z0-9]+/gi,'_')}.png`) });
+  const persistent = resolveUserDataAndProfile();
+  if (persistent) {
+    const context = await openPersistentUserBrowser();
+    try {
+      const page = await gotoCatalog(context);
+      let ok = 0, fail = 0;
+      for (const it of items) {
+        const nomeIf = map[it.nome] || it.nome;
+        const ativo = isStatusAtivo(it.status);
+        const available = CONFIG.STOP_SELL_AT_ZERO ? (ativo && it.estoque > 0) : ativo;
+        try {
+          const a1 = await setAvailability(page, nomeIf, available);
+          const a2 = await setStockIfVisible(page, nomeIf, it.estoque);
+          if (a1 || a2) ok++; else ok++;
+        } catch (e) {
+          fail++;
+          warn('Falha ao atualizar', nomeIf, e.message);
+          await page.screenshot({ path: path.join(CONFIG.EVIDENCE_DIR, `err-${nomeIf.replace(/[^a-z0-9]+/gi,'_')}.png`) });
+        }
       }
+      log('Resumo: OK=', ok, ' FAIL=', fail);
+    } finally {
+      await context.close();
     }
-
-    log('Resumo: OK=', ok, ' FAIL=', fail);
-  } finally {
-    await context.close();
+  } else {
+    // navegador "normal" com auth.json
+    const { browser, context } = await openEphemeralBrowser();
+    try {
+      if (!fs.existsSync(CONFIG.STORAGE_STATE)) {
+        warn('Sem sessão salva. Rode: npm run login');
+        return;
+      }
+      const page = await gotoCatalog(context);
+      let ok = 0, fail = 0;
+      for (const it of items) {
+        const nomeIf = map[it.nome] || it.nome;
+        const ativo = isStatusAtivo(it.status);
+        const available = CONFIG.STOP_SELL_AT_ZERO ? (ativo && it.estoque > 0) : ativo;
+        try {
+          const a1 = await setAvailability(page, nomeIf, available);
+          const a2 = await setStockIfVisible(page, nomeIf, it.estoque);
+          if (a1 || a2) ok++; else ok++;
+        } catch (e) {
+          fail++;
+          warn('Falha ao atualizar', nomeIf, e.message);
+          await page.screenshot({ path: path.join(CONFIG.EVIDENCE_DIR, `err-${nomeIf.replace(/[^a-z0-9]+/gi,'_')}.png`) });
+        }
+      }
+      log('Resumo: OK=', ok, ' FAIL=', fail);
+    } finally {
+      await browser.close();
+    }
   }
 }
 
