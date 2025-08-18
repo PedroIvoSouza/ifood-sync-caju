@@ -67,7 +67,6 @@ function getDriveClient() {
     });
     return google.drive({ version: 'v3', auth });
   }
-  // OAuth token previamente salvo
   if (!CONFIG.GOOGLE_OAUTH_TOKEN_JSON) {
     throw new Error('Defina GOOGLE_OAUTH_TOKEN_JSON no .env');
   }
@@ -81,7 +80,6 @@ async function downloadLatestXlsxBuffer() {
   const drive = getDriveClient();
   if (!CONFIG.GDRIVE_FOLDER_ID) throw new Error('GDRIVE_FOLDER_ID não definido no .env');
 
-  // Sempre pegar o ÚNICO arquivo (ou o mais recente) da pasta
   const q = `'${CONFIG.GDRIVE_FOLDER_ID}' in parents and trashed = false`;
   const { data } = await drive.files.list({
     q,
@@ -130,7 +128,6 @@ function resolveUserDataAndProfile() {
   return { userDataDir, profile: profile || 'Default' };
 }
 
-// Abre contexto persistente no seu Chrome/Edge real (perfil com suas sessões)
 async function openPersistentUserBrowser() {
   const resolved = resolveUserDataAndProfile();
   if (!resolved) throw new Error('Defina CHROME_USER_DATA_DIR no .env para usar o perfil do seu navegador');
@@ -147,7 +144,7 @@ async function openPersistentUserBrowser() {
     ],
   });
 
-  // Logs úteis
+  // Logs úteis por página
   context.on('page', p => {
     p.on('console', msg => log('[page-console]', msg.type(), msg.text()));
     p.on('pageerror', e => err('pageerror:', e.message));
@@ -157,23 +154,12 @@ async function openPersistentUserBrowser() {
   return context;
 }
 
-  // Disfarces básicos
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-    window.chrome = window.chrome || { runtime: {} };
-  });
-
-  return context;
-}
-
-// Abre o catálogo usando a primeira aba do contexto e tenta múltiplas rotas
 async function gotoCatalog(contextOrPage) {
   const isPage = typeof contextOrPage.goto === 'function';
   let page = isPage ? contextOrPage : (contextOrPage.pages()[0] || await contextOrPage.newPage());
+  await page.bringToFront();
 
-  // garante logs mesmo na primeira aba
+  // Garantir handlers mesmo na primeira aba
   page.on('console', (msg) => log('[page-console]', msg.type(), msg.text()));
   page.on('pageerror', (e) => err('pageerror:', e.message));
   page.on('requestfailed', (r) => warn('requestfailed:', r.url(), r.failure()?.errorText || ''));
@@ -186,17 +172,14 @@ async function gotoCatalog(contextOrPage) {
     'https://portal.ifood.com.br/catalog/menu'
   ];
 
-  // helper de navegação “teimosa”
   const tryNavigate = async (p, url) => {
     try {
       log('Abrindo:', url);
-      // 1ª tentativa: navegação normal
       await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      // espera rede estabilizar, mas sem travar para sempre
       await p.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
       if (/portal\.ifood\.com\.br\/(menu|catalog)/i.test(p.url())) return true;
 
-      // 2ª: força via script (alguns bloqueios de extensão quebram o goto)
+      // forçar via script
       await p.evaluate(u => { window.location.href = u; }, url);
       await p.waitForURL(/portal\.ifood\.com\.br\/(menu|catalog)/i, { timeout: 45000 });
       await p.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
@@ -207,7 +190,6 @@ async function gotoCatalog(contextOrPage) {
     }
   };
 
-  // Tente nos candidatos na aba atual
   for (const url of candidates) {
     if (await tryNavigate(page, url)) {
       log('No painel do catálogo:', page.url());
@@ -215,7 +197,7 @@ async function gotoCatalog(contextOrPage) {
     }
   }
 
-  // Se ainda está em about:blank, cria uma nova aba “limpa” e tenta de novo
+  // Se ainda preso, abrir uma aba nova “limpa”
   if (!isPage) {
     const fresh = await contextOrPage.newPage();
     fresh.on('console', (msg) => log('[page-console]', msg.type(), msg.text()));
@@ -225,7 +207,6 @@ async function gotoCatalog(contextOrPage) {
     for (const url of candidates) {
       if (await tryNavigate(fresh, url)) {
         log('No painel do catálogo (nova aba):', fresh.url());
-        // fecha a about:blank antiga se ela ainda existir parada
         try { if (page && page.url().startsWith('about:')) await page.close(); } catch {}
         return fresh;
       }
@@ -235,29 +216,24 @@ async function gotoCatalog(contextOrPage) {
   throw new Error('Não consegui abrir o painel de catálogo do iFood (menu/catalog).');
 }
 
-
-// Busca rápida
+// ---------- Busca/ação nos itens ----------
 async function findAndOpenItem(page, keyword) {
-  // Estratégia genérica para buscar item
   const search = page.getByPlaceholder(/buscar|pesquisar|search/i).first();
   try {
     await search.fill('');
     await search.fill(keyword);
     await search.press('Enter');
-  } catch (_) { /* ignora se não houver campo de busca */ }
+  } catch (_) { /* sem campo de busca, segue */ }
   await page.waitForTimeout(1200);
 }
 
-// Localiza o "card" do produto por nome (usa role=article; fallback em div)
 function cardLocator(page, keyword) {
   const rx = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-  const article = page.getByRole('article').filter({ hasText: rx }).first();
-  return article;
+  return page.getByRole('article').filter({ hasText: rx }).first();
 }
 
-// Heurística: alternar Play/Pause (ícone sem texto)
 async function toggleAvailabilityIconOnly(card, shouldBeAvailable) {
-  // 1) Tente um botão com [aria-pressed]
+  // 1) Botão com aria-pressed
   const toggleBtn = card.locator('button[aria-pressed]').first();
   if (await toggleBtn.isVisible().catch(() => false)) {
     const attr = await toggleBtn.getAttribute('aria-pressed');
@@ -270,17 +246,15 @@ async function toggleAvailabilityIconOnly(card, shouldBeAvailable) {
     return false;
   }
 
-  // 2) Senão, qualquer botão com SVG (ícone de play/pause)
+  // 2) Botão com SVG (ícone play/pause)
   const iconBtn = card.locator('button:has(svg)').first();
   if (await iconBtn.isVisible().catch(() => false)) {
-    // Tenta inferir pelo HTML do SVG
     const svg = iconBtn.locator('svg').first();
     const html = await svg.evaluate(el => el.outerHTML).catch(() => '');
     const looksPlay = /play/i.test(html);
     const looksPause = /pause/i.test(html);
 
-    // Convenção: se mostrar "play", estado atual é PAUSADO (precisa ativar)
-    // se "pause", estado atual é ATIVO (pode pausar).
+    // Heurística: play = está pausado (precisa ativar); pause = está ativo
     let isOn = null;
     if (looksPlay) isOn = false;
     if (looksPause) isOn = true;
@@ -296,18 +270,17 @@ async function toggleAvailabilityIconOnly(card, shouldBeAvailable) {
   throw new Error('Botão de play/pause não localizado no card.');
 }
 
-// Heurística: definir estoque (input numérico simples)
 async function setStockNumberInput(card, qty) {
   // 1) input[type=number]
   let input = card.locator('input[type="number"]').first();
   if (!(await input.isVisible().catch(() => false))) {
-    // 2) qualquer input dentro do card
+    // 2) primeiro input do card
     input = card.locator('input').first();
     if (!(await input.isVisible().catch(() => false))) return false;
   }
   await input.fill('');
   await input.type(String(Math.max(0, Math.floor(qty))));
-  // Tenta salvar (se existir botão próximo)
+  // salvar, se houver
   const save = card.getByRole('button', { name: /salvar|save|aplicar/i }).first();
   if (await save.isVisible().catch(() => false)) {
     await save.click();
@@ -343,7 +316,6 @@ async function setStockIfVisible(page, keyword, qty) {
 // ---------- Core ----------
 function isStatusAtivo(status) {
   const s = (status || '').toLowerCase();
-  // cobre variações comuns
   return /ativo|ativado|dispon[ií]vel|vendendo|on/.test(s) && !/inativo|pausado|off|indispon[ií]vel/.test(s);
 }
 
@@ -354,7 +326,6 @@ function normalizeRows(rows) {
     const estoqueRaw = r[CONFIG.COL_QTY];
     const statusRaw = r[CONFIG.COL_STATUS];
 
-    // Ignorar linhas-resumo ou vazias (ex.: "Total Itens=40")
     if (!nome) continue;
     if (/^total\s*itens\s*=\s*\d+/i.test(nome)) continue;
 
@@ -373,7 +344,6 @@ async function runSync() {
   // 1) Drive → XLSX
   log('Baixando XLSX do Drive...');
   const { buffer: buf } = await downloadLatestXlsxBuffer();
-  // guarda a última planilha como evidência
   fs.writeFileSync(path.join(CONFIG.EVIDENCE_DIR, 'last.xlsx'), buf);
 
   // 2) Parse planilha
@@ -386,7 +356,7 @@ async function runSync() {
 
   const map = loadMap();
 
-  // 3) DRY-RUN: só loga o que faria
+  // 3) DRY-RUN
   if (CONFIG.DRY_RUN) {
     for (const it of items) {
       const nomeIf = map[it.nome] || it.nome;
@@ -397,31 +367,19 @@ async function runSync() {
     return;
   }
 
-  // 4) "--login": só abre o catálogo com seu perfil e fecha (sem ENTER)
+  // 4) "--login": só abre o catálogo e fecha
   if (CONFIG.LOGIN_MODE) {
-    const persistent = resolveUserDataAndProfile();
-    if (persistent) {
-      const context = await openPersistentUserBrowser();
-      try {
-        await gotoCatalog(context);
-        log('Perfil persistente em uso. Fechando e saindo do modo --login.');
-      } finally {
-        await context.close();
-      }
-      return;
-    } else {
-      warn('Perfil persistente não configurado (CHROME_USER_DATA_DIR). Siga com npm run sync após configurar.');
-      return;
+    const context = await openPersistentUserBrowser();
+    try {
+      await gotoCatalog(context);
+      log('Perfil persistente em uso. Fechando e saindo do modo --login.');
+    } finally {
+      await context.close();
     }
-  }
-
-  // 5) Execução "valendo" com perfil persistente
-  const persistent = resolveUserDataAndProfile();
-  if (!persistent) {
-    warn('Configure CHROME_USER_DATA_DIR no .env (perfil do seu Chrome/Edge).');
     return;
   }
 
+  // 5) Execução "valendo"
   const context = await openPersistentUserBrowser();
   try {
     const page = await gotoCatalog(context);
