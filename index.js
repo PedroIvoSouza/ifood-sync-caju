@@ -119,31 +119,28 @@ async function openUndetectedChrome() {
   const executablePath = process.env.CHROME_EXE || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   if (!userDataDir) throw new Error('Defina CHROME_USER_DATA_DIR no .env');
 
-  // Lança o Chrome “limpo” e sem as flags de automação mais óbvias
-  const browser = await chromium.launch({
+  // Abre um contexto PERSISTENTE (perfil real) e remove flags óbvias de automação
+  const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     executablePath,
+    ignoreDefaultArgs: ['--enable-automation'],
     args: [
-      `--user-data-dir=${userDataDir}`,
       '--disable-blink-features=AutomationControlled',
       '--disable-web-security',
       '--disable-features=IsolateOrigins,site-per-process',
     ],
-    ignoreDefaultArgs: ['--enable-automation'],
   });
 
-  const context = await browser.newContext();
-  // Disfarces básicos
+  // Disfarces básicos no contexto
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    // Idiomas e plugins parecidos com um navegador real
     Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
     Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
     window.chrome = window.chrome || { runtime: {} };
   });
 
   const page = await context.newPage();
-  return { browser, context, page };
+  return { context, page };
 }
 
 
@@ -283,27 +280,23 @@ async function runSync() {
   }
 
   if (CONFIG.LOGIN_MODE) {
-  // Tenta modo “menos detectável”
   if (process.env.CHROME_USER_DATA_DIR) {
-    const { browser, context, page } = await openUndetectedChrome();
-    try {
-      await gotoCatalog(page); // se já tiver login neste perfil, deve abrir direto
-      log('Se já estiver no catálogo, volte ao terminal e pressione ENTER.');
-      log('Se pedir login, faça-o normalmente (humano). Depois volte e pressione ENTER.');
-      await new Promise((res) => process.stdin.once('data', res));
-      await saveStorage(context);
-    } finally {
-      await browser.close();
-    }
+    const { context, page } = await openUndetectedChrome();
+    await gotoCatalog(page); // se já tiver logado neste perfil, deve abrir direto
+    log('Se o portal abriu logado, volte ao terminal e pressione ENTER para salvar a sessão.');
+    log('Se pediu login, faça normalmente no navegador aberto; depois volte e pressione ENTER.');
+    await new Promise((res) => process.stdin.once('data', res));
+    await saveStorage(context);
+    await context.close();
+    return;
+  } else {
+    await loginFlow(page);      // modo Chromium padrão
+    await saveStorage(context);
+    await browser.close();
     return;
   }
-
-  // Fallback (Chromium padrão do Playwright)
-  await loginFlow(page);
-  await saveStorage(context);
-  await browser.close();
-  return;
 }
+
 
 
   await gotoCatalog(page);
