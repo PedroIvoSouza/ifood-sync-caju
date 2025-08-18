@@ -295,31 +295,51 @@ async function runSync() {
   // 4) Navegador: prioriza perfil persistente do usuário
   const persistent = resolveUserDataAndProfile();
 
-  if (CONFIG.LOGIN_MODE) {
-    if (persistent) {
-      const { context, page } = await openPersistentUserBrowser();
-      try {
-        // Se já estiver logado, deve abrir o catálogo. Senão, faça login normalmente.
-        await gotoCatalog(page);
-        log('Se o portal já abriu logado, volte ao terminal e pressione ENTER para salvar a sessão.');
-        log('Se pediu login, faça normalmente; quando carregar o catálogo, volte e pressione ENTER.');
-        await new Promise((res) => process.stdin.once('data', res));
-        await saveStorage(context); // salva um backup (auth.json)
-      } finally {
-        await context.close();
+  // ---------- LOGIN: salvar sessão automaticamente, sem ENTER ----------
+if (CONFIG.LOGIN_MODE) {
+  const persistent = resolveUserDataAndProfile();
+
+  if (persistent) {
+    // Usa seu Chrome/Edge com perfil persistente
+    const { context, page } = await openPersistentUserBrowser();
+    try {
+      // Tenta abrir o catálogo direto
+      await page.goto(CONFIG.IFOOD_CATALOG_URL, { waitUntil: 'domcontentloaded' });
+      await page.waitForLoadState('networkidle');
+
+      if (/\/login/i.test(page.url())) {
+        log('Faça login na janela aberta. Vou salvar a sessão automaticamente quando o catálogo carregar.');
+        // espera sair da URL de login (sem timeout)
+        await page.waitForURL(url => !/\/login/i.test(url), { timeout: 0 });
+        await page.waitForLoadState('networkidle');
       }
-      return;
-    } else {
-      // Fallback: Chromium padrão (pode acionar desafios de bot)
-      const browser = await chromium.launch({ headless: false });
-      const context = await browser.newContext();
-      const page = await context.newPage();
-      await loginFlow(page);
-      await saveStorage(context);
-      await browser.close();
-      return;
+
+      await saveStorage(context); // grava auth.json
+      log('✅ Sessão capturada sem precisar pressionar ENTER.');
+    } finally {
+      await context.close();
     }
+    return;
+  } else {
+    // Fallback: Chromium padrão (pode acionar desafio)
+    const browser = await chromium.launch({ headless: false });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+
+    await page.goto(CONFIG.IFOOD_LOGIN_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle');
+    log('Faça login; salvarei automaticamente quando sair da URL de login.');
+
+    await page.waitForURL(url => !/\/login/i.test(url), { timeout: 0 });
+    await page.waitForLoadState('networkidle');
+
+    await saveStorage(context);
+    await browser.close();
+    log('✅ Sessão capturada sem precisar pressionar ENTER.');
+    return;
   }
+}
+
 
   // Execução "valendo"
   if (persistent) {
