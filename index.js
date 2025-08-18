@@ -269,7 +269,7 @@ async function runSync() {
   // 1) Drive → XLSX
   log('Baixando XLSX do Drive...');
   const { buffer: buf, name } = await downloadLatestXlsxBuffer();
-  fs.writeFileSync(path.join(CONFIG.EVIDENCE_DIR, 'last.xlsx'), buf);
+  fs.writeFileSync(path.join(__dirname, 'auth.json'), JSON.stringify(tokens, null, 2));
 
   // 2) Parse planilha
   const rows = parseXlsxBuffer(buf);
