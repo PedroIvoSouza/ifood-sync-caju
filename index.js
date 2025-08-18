@@ -3,7 +3,7 @@
 // - Lê o único XLSX da pasta do Google Drive
 // - Interpreta Nome / Estoque / Status Venda
 // - Usa seu Chrome/Edge (perfil persistente) para operar no painel do iFood
-// - Primeiro uso: --login (captura sessão). Depois: sync direto.
+// - "--dry-run": simula; "--login": só abre catálogo com seu perfil; padrão: sincroniza
 // ================================================
 
 require('dotenv').config();
@@ -37,7 +37,6 @@ const CONFIG = {
   // Execução
   DRY_RUN: process.argv.includes('--dry-run'),
   LOGIN_MODE: process.argv.includes('--login'),
-  STORAGE_STATE: process.env.STORAGE_STATE || './auth.json',
   EVIDENCE_DIR: process.env.EVIDENCE_DIR || './evidence',
 
   // Mapeamento opcional: Nome planilha -> Nome no iFood
@@ -45,12 +44,12 @@ const CONFIG = {
 
   // Chrome/Edge (perfil persistente)
   CHROME_CHANNEL: process.env.CHROME_CHANNEL || '', // 'chrome' | 'msedge' | ''
-  CHROME_USER_DATA_DIR: process.env.CHROME_USER_DATA_DIR || '', // ...\User Data  (ou ...\User Data\Default)
+  CHROME_USER_DATA_DIR: process.env.CHROME_USER_DATA_DIR || '', // ...\User Data  OU  ...\User Data\Default
   CHROME_PROFILE: process.env.CHROME_PROFILE || '', // 'Default' | 'Profile 1' | etc (opcional)
   CHROME_EXE: process.env.CHROME_EXE || '', // caminho do executável (opcional)
 };
 
-// ---------- Utils de log ----------
+// ---------- Utils ----------
 const log = (...a) => console.log(new Date().toISOString(), '-', ...a);
 const warn = (...a) => console.warn(new Date().toISOString(), '- WARN -', ...a);
 const err = (...a) => console.error(new Date().toISOString(), '- ERROR -', ...a);
@@ -110,7 +109,7 @@ function loadMap() {
   return JSON.parse(fs.readFileSync(CONFIG.MAP_FILE, 'utf8'));
 }
 
-// ---------- Playwright helpers ----------
+// ---------- Helpers Playwright ----------
 async function ensureEvidenceDir() {
   if (!fs.existsSync(CONFIG.EVIDENCE_DIR)) fs.mkdirSync(CONFIG.EVIDENCE_DIR, { recursive: true });
 }
@@ -141,18 +140,16 @@ async function openPersistentUserBrowser() {
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    channel: CONFIG.CHROME_CHANNEL || undefined,
-    executablePath: CONFIG.CHROME_EXE || undefined,
-
-    // ⬇️ Removemos as flags automáticas do Playwright QUE INCLUEM o no-sandbox em alguns ambientes
-    ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'],
-
+    channel: CONFIG.CHROME_CHANNEL || undefined,      // 'chrome' | 'msedge' | undefined
+    executablePath: CONFIG.CHROME_EXE || undefined,   // opcional
+    ignoreDefaultArgs: ['--enable-automation', '--no-sandbox'], // remove flags "suspeitas"
     args: [
       `--profile-directory=${profile}`,
       '--start-maximized',
     ],
   });
 
+  // Disfarces básicos
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
@@ -164,21 +161,7 @@ async function openPersistentUserBrowser() {
   return { context, page };
 }
 
-
-async function saveStorage(context) {
-  await context.storageState({ path: CONFIG.STORAGE_STATE });
-  log('Sessão salva em', CONFIG.STORAGE_STATE);
-}
-
-// ---------- Fluxos de UI ----------
-async function loginFlow(page) {
-  log('Abrindo login:', CONFIG.IFOOD_LOGIN_URL);
-  await page.goto(CONFIG.IFOOD_LOGIN_URL, { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle');
-  log('Faça login manualmente (2FA incluso). Quando terminar, volte ao terminal e pressione ENTER.');
-  await new Promise((res) => process.stdin.once('data', res));
-}
-
+// Navegação no portal
 async function gotoCatalog(page) {
   log('Indo ao catálogo:', CONFIG.IFOOD_CATALOG_URL);
   await page.goto(CONFIG.IFOOD_CATALOG_URL, { waitUntil: 'domcontentloaded' });
@@ -295,97 +278,33 @@ async function runSync() {
     return;
   }
 
-  // 4) Navegador: prioriza perfil persistente do usuário
-  const persistent = resolveUserDataAndProfile();
-
-  // ---------- LOGIN: salvar sessão automaticamente, sem ENTER ----------
-if (CONFIG.LOGIN_MODE) {
-  const persistent = resolveUserDataAndProfile();
-
-  if (persistent) {
-    // Usa seu Chrome/Edge com perfil persistente
-    const { context, page } = await openPersistentUserBrowser();
-    try {
-      // Tenta abrir o catálogo direto
-      await page.goto(CONFIG.IFOOD_CATALOG_URL, { waitUntil: 'domcontentloaded' });
-      await page.waitForLoadState('networkidle');
-
-      if (/\/login/i.test(page.url())) {
-        log('Faça login na janela aberta. Vou salvar a sessão automaticamente quando o catálogo carregar.');
-        // espera sair da URL de login (sem timeout)
-        await page.waitForURL(url => !/\/login/i.test(url), { timeout: 0 });
-        await page.waitForLoadState('networkidle');
+  // 4) "--login": só abre o catálogo com seu perfil e fecha (sem ENTER)
+  if (CONFIG.LOGIN_MODE) {
+    const persistent = resolveUserDataAndProfile();
+    if (persistent) {
+      const { context, page } = await openPersistentUserBrowser();
+      try {
+        await gotoCatalog(page);
+        log('Perfil persistente em uso. Fechando e saindo do modo --login.');
+      } finally {
+        await context.close();
       }
-
-      await saveStorage(context); // grava auth.json
-      log('✅ Sessão capturada sem precisar pressionar ENTER.');
-    } finally {
-      await context.close();
-    }
-    return;
-  } else {
-    // Fallback: Chromium padrão (pode acionar desafio)
-    const browser = await chromium.launch({ headless: false });
-    const context = await browser.newContext();
-    const page = await context.newPage();
-
-    await page.goto(CONFIG.IFOOD_LOGIN_URL, { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle');
-    log('Faça login; salvarei automaticamente quando sair da URL de login.');
-
-    await page.waitForURL(url => !/\/login/i.test(url), { timeout: 0 });
-    await page.waitForLoadState('networkidle');
-
-    await saveStorage(context);
-    await browser.close();
-    log('✅ Sessão capturada sem precisar pressionar ENTER.');
-    return;
-  }
-}
-
-
-  // Execução "valendo"
-  if (persistent) {
-    const { context, page } = await openPersistentUserBrowser();
-    try {
-      await gotoCatalog(page);
-
-      let ok = 0, fail = 0;
-      for (const it of items) {
-        const nomeIf = map[it.nome] || it.nome;
-        const ativo = isStatusAtivo(it.status);
-        const available = CONFIG.STOP_SELL_AT_ZERO ? (ativo && it.estoque > 0) : ativo;
-
-        try {
-          const a1 = await setAvailability(page, nomeIf, available);
-          const a2 = await setStockIfVisible(page, nomeIf, it.estoque);
-          if (a1 || a2) ok++; else ok++;
-        } catch (e) {
-          fail++;
-          warn('Falha ao atualizar', nomeIf, e.message);
-          await page.screenshot({ path: path.join(CONFIG.EVIDENCE_DIR, `err-${nomeIf.replace(/[^a-z0-9]+/gi,'_')}.png`) });
-        }
-      }
-
-      log('Resumo: OK=', ok, ' FAIL=', fail);
-    } finally {
-      await context.close();
-    }
-    return;
-  } else {
-    // Fallback sem perfil persistente (usa storageState se existir)
-    const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({
-      storageState: fs.existsSync(CONFIG.STORAGE_STATE) ? CONFIG.STORAGE_STATE : undefined,
-    });
-    const page = await context.newPage();
-
-    if (!fs.existsSync(CONFIG.STORAGE_STATE)) {
-      warn('Nenhuma sessão salva. Rode: npm run login');
-      await browser.close();
+      return;
+    } else {
+      warn('Perfil persistente não configurado (CHROME_USER_DATA_DIR). Siga com npm run sync após configurar.');
       return;
     }
+  }
 
+  // 5) Execução "valendo" com perfil persistente
+  const persistent = resolveUserDataAndProfile();
+  if (!persistent) {
+    warn('Configure CHROME_USER_DATA_DIR no .env (perfil do seu Chrome/Edge).');
+    return;
+  }
+
+  const { context, page } = await openPersistentUserBrowser();
+  try {
     await gotoCatalog(page);
 
     let ok = 0, fail = 0;
@@ -406,7 +325,8 @@ if (CONFIG.LOGIN_MODE) {
     }
 
     log('Resumo: OK=', ok, ' FAIL=', fail);
-    await browser.close();
+  } finally {
+    await context.close();
   }
 }
 
